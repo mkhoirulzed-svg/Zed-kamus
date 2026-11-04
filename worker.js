@@ -1,4 +1,4 @@
-const allowedOrigin = origin => origin === "https://voice.zaidalabs.com" || /^https:\/\/[a-z0-9-]+\.pages\.dev$/.test(origin || "");
+const allowedOrigin = origin => ["https://voice.zaidalabs.com","https://kamus.zaidalabs.com"].includes(origin) || /^https:\/\/[a-z0-9-]+\.pages\.dev$/.test(origin || "");
 const corsHeaders = request => {const origin=request.headers.get("Origin")||"";return {"Access-Control-Allow-Origin":allowedOrigin(origin)?origin:"https://voice.zaidalabs.com","Vary":"Origin","Access-Control-Allow-Methods":"GET,POST,OPTIONS","Access-Control-Allow-Headers":"Content-Type"}};
 const json=(request,data,status=200)=>new Response(JSON.stringify(data),{status,headers:{...corsHeaders(request),"Content-Type":"application/json; charset=utf-8"}});
 const LANGUAGES = [
