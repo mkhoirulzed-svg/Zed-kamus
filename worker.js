@@ -78,47 +78,55 @@ async function speakData(body,env){
   if(!language)return {error:"Bahasa tidak dikenal.",status:400};
   if(!allowedVoices.includes(voice))return {error:"Pilihan suara tidak tersedia.",status:400};
 
+  // Gemini TTS memakai generateContent, bukan Interactions API.
   const models=["gemini-3.8-flash-tts","gemini-3.8-flash-lite-tts"];
   let lastError="Gemini TTS gagal membuat audio.";
   let lastStatus=502;
 
   for(let i=0;i<models.length;i++){
     try{
-      const r=await fetch("https://generativelanguage.googleapis.com/v1beta/interactions",{
+      const r=await fetch("https://generativelanguage.googleapis.com/v1beta/models/"+models[i]+":generateContent",{
         method:"POST",
         headers:{"Content-Type":"application/json","x-goog-api-key":env.GEMINI_API_KEY},
         body:JSON.stringify({
-          model:models[i],
-          input:[{
-            type:"user_input",
-            content:[{
-              type:"text",
-              text,
-              annotations:[{
-                type:"speech_metadata",
-                style:"Speak naturally and clearly in "+language.name+". Use a warm, conversational Indonesian regional-language pronunciation. Read only the supplied text."
-              }]
+          contents:[{
+            role:"user",
+            parts:[{
+              text:"Bacakan teks berikut dengan jelas dan alami dalam bahasa "+language.name+". Gunakan pelafalan bahasa daerah tersebut sejauh didukung. Bacakan hanya teks ini: "+text,
+              speech_metadata:{style:"Speak naturally and clearly in "+language.name+". Warm, conversational delivery."}
             }]
           }],
-          response_format:{type:"audio",mime_type:"audio/wav"},
-          generation_config:{speech_config:[{voice}]}
+          generationConfig:{
+            responseModalities:["AUDIO"],
+            speechConfig:{voiceConfig:{voice}}
+          }
         })
       });
       const d=await r.json().catch(()=>({}));
       if(!r.ok){
         lastError=d.error?.message||"Gemini TTS gagal membuat audio.";
         lastStatus=r.status;
-        if([500,502,503,504].includes(r.status)&&i<models.length-1)continue;
+        if([429,500,502,503,504].includes(r.status)&&i<models.length-1)continue;
         return {error:lastError,status:lastStatus};
       }
-      const audioBase64=d.output_audio?.data||d.output_audio?.audio?.data||"";
+
+      const parts=d.candidates?.[0]?.content?.parts||[];
+      const audioPart=parts.find(p=>p.inlineData?.data);
+      const audioBase64=audioPart?.inlineData?.data||"";
       if(!audioBase64){
-        lastError="Gemini tidak mengembalikan data audio.";
+        const textMessage=parts.filter(p=>p.text).map(p=>p.text).join(" ").trim();
+        lastError=textMessage||"Gemini merespons, tetapi tidak menyertakan data audio. Periksa dukungan model dan konfigurasi TTS.";
         lastStatus=502;
         if(i<models.length-1)continue;
         return {error:lastError,status:lastStatus};
       }
-      return {audioBase64,mimeType:d.output_audio?.mime_type||"audio/wav",language:language.name,voice,model:models[i]};
+      return {
+        audioBase64,
+        mimeType:audioPart.inlineData.mimeType||"audio/wav",
+        language:language.name,
+        voice,
+        model:models[i]
+      };
     }catch(e){
       lastError="Tidak dapat menghubungi layanan TTS: "+String(e?.message||e);
       lastStatus=502;
