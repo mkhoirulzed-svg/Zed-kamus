@@ -1,4 +1,4 @@
-const API_BASE = ""; // Same-origin Worker API. Set to your Worker URL only if frontend and API use different origins.
+const API_BASE = "https://api.voice.zaidalabs.com"; // Custom domain Worker API
 const languages = [
 {id:"jv",name:"Jawa",status:"experimental"},{id:"su",name:"Sunda",status:"experimental"},{id:"ban",name:"Bali",status:"experimental"},{id:"bjn",name:"Banjar",status:"experimental"},{id:"bug",name:"Bugis",status:"experimental"},{id:"ace",name:"Aceh",status:"experimental"},{id:"min",name:"Minangkabau",status:"experimental"},{id:"mad",name:"Madura",status:"experimental"},{id:"bbc",name:"Batak Toba",status:"experimental"},{id:"nij",name:"Dayak Ngaju",status:"experimental"}
 ];
