@@ -1,4 +1,4 @@
-const API_BASE = "https://zaida-voice-nusantara-api.mkhoirulzed.workers.dev"; // Cloudflare Workers default URL
+const API_BASE = "https://api.voice.zaidalabs.com";
 const languages = [
 {id:"jv",name:"Jawa",status:"experimental"},{id:"su",name:"Sunda",status:"experimental"},{id:"ban",name:"Bali",status:"experimental"},{id:"bjn",name:"Banjar",status:"experimental"},{id:"bug",name:"Bugis",status:"experimental"},{id:"ace",name:"Aceh",status:"experimental"},{id:"min",name:"Minangkabau",status:"experimental"},{id:"mad",name:"Madura",status:"experimental"},{id:"bbc",name:"Batak Toba",status:"experimental"},{id:"nij",name:"Dayak Ngaju",status:"experimental"}
 ];
@@ -6,9 +6,31 @@ const $=id=>document.getElementById(id), target=$("targetLang");
 languages.forEach(l=>{const o=document.createElement("option");o.value=l.id;o.textContent=l.name+" · uji coba";target.append(o)});
 $("inputText").addEventListener("input",()=> $("charCount").textContent=$("inputText").value.length+"/1200");
 $("swap").addEventListener("click",()=>{const s=$("sourceLang"),old=s.value;s.value=target.value;target.value=old;});
-async function api(path,body){const r=await fetch(API_BASE+"/api/"+path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});const data=await r.json().catch(()=>({error:"Respons server tidak valid"}));if(!r.ok)throw new Error(data.error||"Permintaan gagal");return data}
-$("translateBtn").addEventListener("click",async()=>{const text=$("inputText").value.trim();if(!text){$("status").textContent="Masukkan teks terlebih dahulu.";return}const btn=$("translateBtn");btn.disabled=true;$("status").textContent="Sedang menerjemahkan…";$("resultPanel").classList.add("hidden");try{const data=await api("translate",{text,source:$("sourceLang").value,target:target.value});$("translatedText").textContent=data.translation;$("resultPanel").classList.remove("hidden");$("status").textContent="Terjemahan selesai. Periksa kembali hasilnya bersama penutur asli."}catch(e){$("status").textContent=e.message}finally{btn.disabled=false}});
+async function api(path,body){
+  const r=await fetch(API_BASE+"/api/"+path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const data=await r.json().catch(()=>({error:"Respons server tidak valid"}));
+  if(!r.ok)throw new Error(data.error||"Permintaan gagal");
+  return data;
+}
+$("translateBtn").addEventListener("click",async()=>{
+  const text=$("inputText").value.trim();
+  if(!text){$("status").textContent="Masukkan teks terlebih dahulu.";return}
+  const btn=$("translateBtn");btn.disabled=true;$("status").textContent="Sedang menerjemahkan…";$("resultPanel").classList.add("hidden");
+  try{
+    const data=await api("translate",{text,source:$("sourceLang").value,target:target.value});
+    $("translatedText").textContent=data.translation;$("resultPanel").classList.remove("hidden");
+    $("status").textContent="Terjemahan selesai · "+(data.model||"OpenRouter")+". Periksa kembali bersama penutur asli.";
+  }catch(e){$("status").textContent=e.message}finally{btn.disabled=false}
+});
 $("copyBtn").addEventListener("click",async()=>{try{await navigator.clipboard.writeText($("translatedText").textContent);$("copyBtn").textContent="Tersalin ✓";setTimeout(()=>$("copyBtn").textContent="Salin",1500)}catch{$("copyBtn").textContent="Gagal menyalin"}});
-$("speakBtn").addEventListener("click",async()=>{const text=$("translatedText").textContent;if(!text)return;const btn=$("speakBtn");btn.disabled=true;$("audioStatus").textContent="Membuat audio…";try{const data=await api("speak",{text,language:target.value,voice:$("voiceSelect")?.value||"Kore"});const audio=$("audioPlayer");audio.pause();audio.src="data:"+(data.mimeType||"audio/wav")+";base64,"+data.audioBase64;audio.classList.remove("hidden");await audio.play();$("audioStatus").textContent="Audio siap · "+(data.model||"Gemini TTS")}catch(e){$("audioStatus").textContent=e.message}finally{btn.disabled=false}});
+$("speakBtn").addEventListener("click",async()=>{
+  const text=$("translatedText").textContent;if(!text)return;
+  const btn=$("speakBtn");btn.disabled=true;$("audioStatus").textContent="Membuat audio melalui OpenRouter…";
+  try{
+    const data=await api("speak",{text,language:target.value,voice:$("voiceSelect")?.value||"Kore"});
+    const audio=$("audioPlayer");audio.pause();audio.src="data:"+(data.mimeType||"audio/mpeg")+";base64,"+data.audioBase64;
+    audio.classList.remove("hidden");await audio.play();$("audioStatus").textContent="Audio siap · "+(data.model||"OpenRouter");
+  }catch(e){$("audioStatus").textContent=e.message}finally{btn.disabled=false}
+});
 fetch(API_BASE+"/api/languages").then(r=>r.ok?r.json():null).then(data=>{if(data?.languages){const supported=new Set(data.languages.map(x=>x.id));[...target.options].forEach(o=>{if(!supported.has(o.value))o.textContent=o.textContent.replace("uji coba","belum tersedia")})}}).catch(()=>{});
 if("serviceWorker" in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("/sw.js").catch(()=>{}));
