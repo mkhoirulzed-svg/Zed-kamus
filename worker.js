@@ -1,138 +1,225 @@
-const allowedOrigin = origin => ["https://voice.zaidalabs.com","https://kamus.zaidalabs.com"].includes(origin) || /^https:\/\/[a-z0-9-]+\.pages\.dev$/.test(origin || "");
-const corsHeaders = request => {const origin=request.headers.get("Origin")||"";return {"Access-Control-Allow-Origin":allowedOrigin(origin)?origin:"https://voice.zaidalabs.com","Vary":"Origin","Access-Control-Allow-Methods":"GET,POST,OPTIONS","Access-Control-Allow-Headers":"Content-Type"}};
-const json=(request,data,status=200)=>new Response(JSON.stringify(data),{status,headers:{...corsHeaders(request),"Content-Type":"application/json; charset=utf-8"}});
+const API_BASE = "https://openrouter.ai/api/v1";
+
 const LANGUAGES = [
-{id:"jv",name:"Jawa",status:"experimental"},{id:"su",name:"Sunda",status:"experimental"},{id:"ban",name:"Bali",status:"experimental"},{id:"bjn",name:"Banjar",status:"experimental"},{id:"bug",name:"Bugis",status:"experimental"},{id:"ace",name:"Aceh",status:"experimental"},{id:"min",name:"Minangkabau",status:"experimental"},{id:"mad",name:"Madura",status:"experimental"},{id:"bbc",name:"Batak Toba",status:"experimental"},{id:"nij",name:"Dayak Ngaju",status:"experimental"}
+  {id:"jv",name:"Jawa"},{id:"su",name:"Sunda"},{id:"ban",name:"Bali"},
+  {id:"bjn",name:"Banjar"},{id:"bug",name:"Bugis"},{id:"ace",name:"Aceh"},
+  {id:"min",name:"Minangkabau"},{id:"mad",name:"Madura"},
+  {id:"bbc",name:"Batak Toba"},{id:"nij",name:"Dayak Ngaju"}
 ];
-export default {async fetch(request,env){if(request.method==="OPTIONS")return new Response(null,{headers:corsHeaders(request)});const url=new URL(request.url);if(url.pathname==="/api/health")return json(request,{ok:true,service:"ZAIDA Voice Nusantara",configured:!!env.GEMINI_API_KEY});if(url.pathname==="/api/languages")return json(request,{languages:LANGUAGES});if(request.method!=="POST")return json(request,{error:"Method tidak diizinkan"},405);if(!env.GEMINI_API_KEY)return json(request,{error:"API belum dikonfigurasi. Tambahkan secret GEMINI_API_KEY di Cloudflare Worker."},503);
-let body;try{body=await request.json()}catch{return json(request,{error:"Format JSON tidak valid"},400)}
-if(url.pathname==="/api/translate"){const d=await translateData(body,env);return d.error?json(request,{error:d.error},d.status||500):json(request,d)}
-if(url.pathname==="/api/speak"){const d=await speakData(body,env);return d.error?json(request,{error:d.error},d.status||500):json(request,d)}
-if(url.pathname==="/api/translate-speak"){const translated=await translateData(body,env);if(translated.error)return json(request,{error:translated.error},translated.status||500);const audio=await speakData({text:translated.translation,language:body.target},env);if(audio.error)return json(request,{translation:translated.translation,error:audio.error},audio.status||500);return json(request,{translation:translated.translation,...audio})}
-return json(request,{error:"Endpoint tidak ditemukan"},404)}};
-async function translateData(body,env){
-  const text=String(body.text||"").trim();
-  const source=String(body.source||"id");
-  const target=String(body.target||"");
-  if(!text||text.length>1200)return {error:"Teks wajib diisi (maksimal 1.200 karakter).",status:400};
-  const lang=LANGUAGES.find(x=>x.id===target);
-  if(!lang)return {error:"Bahasa tujuan belum tersedia.",status:400};
 
-  const sourceName=source==="id"?"Bahasa Indonesia":LANGUAGES.find(x=>x.id===source)?.name||"bahasa sumber";
-  const prompt="Terjemahkan teks berikut dari "+sourceName+" ke bahasa "+lang.name+". Pertahankan makna, kesopanan, dan konteks. Jika tidak yakin dengan padanan lokal, jangan mengarang; berikan hasil paling mendekati secara alami. Keluarkan hanya teks terjemahan tanpa penjelasan. Teks: "+text;
+const TRANSLATE_MODEL = env => env.OPENROUTER_TRANSLATE_MODEL || "qwen/qwen3-32b";
+const TRANSLATE_FALLBACK = env => env.OPENROUTER_TRANSLATE_FALLBACK_MODEL || "google/gemini-3.8-flash";
+const TTS_MODEL = env => env.OPENROUTER_TTS_MODEL || "google/gemini-3.8-flash-tts";
+const TTS_FALLBACK = env => env.OPENROUTER_TTS_FALLBACK_MODEL || "google/gemini-3.8-flash-lite-tts";
 
-  // Model utama dicoba lebih dahulu. Jika sedang overload, otomatis pindah ke model cadangan.
-  const models=["gemini-3.8-flash","gemini-3.6-flash"];
-  let lastError="Gemini gagal menerjemahkan.";
-  let lastStatus=502;
+const allowedOrigin = origin =>
+  ["https://voice.zaidalabs.com","https://kamus.zaidalabs.com"].includes(origin) ||
+  /^https:\/\/[a-z0-9-]+\.pages\.dev$/.test(origin || "");
 
-  for(let i=0;i<models.length;i++){
-    const model=models[i];
-    try{
-      const r=await fetch("https://generativelanguage.googleapis.com/v1beta/interactions",{
-        method:"POST",
-        headers:{"Content-Type":"application/json","x-goog-api-key":env.GEMINI_API_KEY},
-        body:JSON.stringify({
-          model,
-          input:prompt,
-          generation_config:{thinking_level:"low",temperature:0.2,max_output_tokens:1024}
-        })
+const corsHeaders = request => {
+  const origin = request.headers.get("Origin") || "";
+  return {
+    "Access-Control-Allow-Origin": allowedOrigin(origin) ? origin : "https://voice.zaidalabs.com",
+    "Vary": "Origin",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type"
+  };
+};
+
+const json = (request,data,status=200) =>
+  new Response(JSON.stringify(data), {
+    status,
+    headers:{...corsHeaders(request),"Content-Type":"application/json; charset=utf-8"}
+  });
+
+const errorMessage = (data,fallback) =>
+  data?.error?.message || data?.message || fallback;
+
+async function openRouterRequest(env,path,payload) {
+  if (!env.OPENROUTER_API_KEY) {
+    const error = new Error("API belum dikonfigurasi. Tambahkan secret OPENROUTER_API_KEY di Cloudflare Worker.");
+    error.status = 503;
+    throw error;
+  }
+  const response = await fetch(API_BASE + path, {
+    method:"POST",
+    headers:{
+      "Authorization":"Bearer " + env.OPENROUTER_API_KEY,
+      "Content-Type":"application/json",
+      "HTTP-Referer":"https://voice.zaidalabs.com",
+      "X-Title":"ZAIDA Voice Nusantara"
+    },
+    body:JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    const raw = await response.text();
+    let detail = raw;
+    try { detail = errorMessage(JSON.parse(raw),raw); } catch {}
+    const error = new Error(detail || "Permintaan OpenRouter gagal.");
+    error.status = response.status;
+    throw error;
+  }
+  return response;
+}
+
+function extractText(content) {
+  if (typeof content === "string") return content.trim();
+  if (Array.isArray(content)) {
+    return content.map(part => typeof part === "string" ? part : (part?.text || "")).join("").trim();
+  }
+  return "";
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i=0; i<bytes.length; i+=chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i+chunkSize));
+  }
+  return btoa(binary);
+}
+
+export default {
+  async fetch(request,env) {
+    if (request.method === "OPTIONS") return new Response(null,{headers:corsHeaders(request)});
+    const url = new URL(request.url);
+
+    if (url.pathname === "/api/health") {
+      return json(request,{
+        ok:true,
+        service:"ZAIDA Voice Nusantara",
+        configured:!!env.OPENROUTER_API_KEY,
+        provider:"OpenRouter",
+        models:{
+          translate:TRANSLATE_MODEL(env),
+          translateFallback:TRANSLATE_FALLBACK(env),
+          tts:TTS_MODEL(env),
+          ttsFallback:TTS_FALLBACK(env)
+        }
       });
-      const d=await r.json().catch(()=>({}));
-      if(!r.ok){
-        lastError=d.error?.message||"Gemini gagal menerjemahkan.";
-        lastStatus=r.status;
-        // Hanya pindah model untuk gangguan sementara/kapasitas server.
-        if([500,502,503,504].includes(r.status)&&i<models.length-1)continue;
-        return {error:lastError,status:lastStatus};
+    }
+    if (url.pathname === "/api/languages") return json(request,{languages:LANGUAGES.map(x=>({...x,status:"experimental"}))});
+    if (request.method !== "POST") return json(request,{error:"Method tidak diizinkan."},405);
+
+    let body;
+    try { body = await request.json(); }
+    catch { return json(request,{error:"Format JSON tidak valid."},400); }
+
+    try {
+      if (url.pathname === "/api/translate") return json(request,await translateData(body,env));
+      if (url.pathname === "/api/speak") return json(request,await speakData(body,env));
+      if (url.pathname === "/api/translate-speak") {
+        const translated = await translateData(body,env);
+        const audio = await speakData({text:translated.translation,language:body.target,voice:body.voice},env);
+        return json(request,{translation:translated.translation,...audio});
       }
-      const translation=(d.steps||[])
-        .filter(s=>s.type==="model_output")
-        .flatMap(s=>s.content||[])
-        .filter(p=>p.type==="text")
-        .map(p=>p.text||"")
-        .join("")
-        .trim();
-      if(!translation){
-        lastError="Model tidak menghasilkan teks terjemahan.";
-        lastStatus=502;
-        if(i<models.length-1)continue;
-        return {error:lastError,status:lastStatus};
-      }
-      return {translation,source,target,language:lang.name,model};
-    }catch(e){
-      lastError="Tidak dapat menghubungi layanan AI: "+String(e?.message||e);
-      lastStatus=502;
-      if(i<models.length-1)continue;
-      return {error:lastError,status:lastStatus};
+      return json(request,{error:"Endpoint tidak ditemukan."},404);
+    } catch (error) {
+      return json(request,{error:error.message || "Terjadi kesalahan pada layanan AI."},error.status || 502);
     }
   }
-  return {error:lastError,status:lastStatus};
-}
-async function speakData(body,env){
-  const text=String(body.text||"").trim();
-  const language=LANGUAGES.find(x=>x.id===body.language);
-  const voice=String(body.voice||"Kore");
-  const allowedVoices=["Kore","Puck"];
-  if(!text||text.length>1200)return {error:"Teks audio wajib diisi (maksimal 1.200 karakter).",status:400};
-  if(!language)return {error:"Bahasa tidak dikenal.",status:400};
-  if(!allowedVoices.includes(voice))return {error:"Pilihan suara tidak tersedia.",status:400};
+};
 
-  // Gemini TTS memakai generateContent, bukan Interactions API.
-  const models=["gemini-3.8-flash-tts","gemini-3.8-flash-lite-tts"];
-  let lastError="Gemini TTS gagal membuat audio.";
-  let lastStatus=502;
+async function translateData(body,env) {
+  const text = String(body.text || "").trim();
+  const source = String(body.source || "id");
+  const target = String(body.target || "");
+  if (!text || text.length > 1200) {
+    const error = new Error("Teks wajib diisi (maksimal 1.200 karakter)."); error.status=400; throw error;
+  }
+  const targetLanguage = LANGUAGES.find(x=>x.id===target);
+  if (!targetLanguage) {
+    const error = new Error("Bahasa tujuan belum tersedia."); error.status=400; throw error;
+  }
+  const sourceLanguage = source === "id" ? "Bahasa Indonesia" : LANGUAGES.find(x=>x.id===source)?.name;
+  if (!sourceLanguage) {
+    const error = new Error("Bahasa sumber belum tersedia."); error.status=400; throw error;
+  }
 
-  for(let i=0;i<models.length;i++){
-    try{
-      const r=await fetch("https://generativelanguage.googleapis.com/v1beta/models/"+models[i]+":generateContent",{
-        method:"POST",
-        headers:{"Content-Type":"application/json","x-goog-api-key":env.GEMINI_API_KEY},
-        body:JSON.stringify({
-          contents:[{
-            role:"user",
-            parts:[{
-              text:"Bacakan teks berikut dengan jelas dan alami dalam bahasa "+language.name+". Gunakan pelafalan bahasa daerah tersebut sejauh didukung. Bacakan hanya teks ini: "+text,
-              speech_metadata:{style:"Speak naturally and clearly in "+language.name+". Warm, conversational delivery."}
-            }]
-          }],
-          generationConfig:{
-            responseModalities:["AUDIO"],
-            speechConfig:{voiceConfig:{voice}}
-          }
-        })
+  const systemPrompt = [
+    "Anda adalah penerjemah profesional bahasa-bahasa Nusantara.",
+    "Terjemahkan dengan setia, alami, dan sesuai pemakaian penutur asli.",
+    "Jangan menerjemahkan secara harfiah jika hasilnya tidak alami.",
+    "Pertahankan maksud, konteks, tingkat kesopanan, nama orang, angka, dan tanda baca.",
+    "Jangan mencampur bahasa daerah lain.",
+    "Jangan mengarang kosakata atau mengklaim kepastian jika tidak yakin.",
+    "Jika ada beberapa ragam/dialek, gunakan ragam umum yang paling dikenal dan jangan menambahkan penjelasan.",
+    "Keluarkan hanya hasil terjemahan, tanpa label, catatan, atau tanda kutip."
+  ].join(" ");
+
+  const userPrompt = "Terjemahkan dari " + sourceLanguage + " ke " + targetLanguage.name + ".\nTeks:\n" + text;
+  const models = [TRANSLATE_MODEL(env),TRANSLATE_FALLBACK(env)].filter((v,i,a)=>v && a.indexOf(v)===i);
+  let lastError;
+
+  for (const model of models) {
+    try {
+      const response = await openRouterRequest(env,"/chat/completions",{
+        model,
+        messages:[
+          {role:"system",content:systemPrompt},
+          {role:"user",content:userPrompt}
+        ],
+        temperature:0.2,
+        max_tokens:900
       });
-      const d=await r.json().catch(()=>({}));
-      if(!r.ok){
-        lastError=d.error?.message||"Gemini TTS gagal membuat audio.";
-        lastStatus=r.status;
-        if([429,500,502,503,504].includes(r.status)&&i<models.length-1)continue;
-        return {error:lastError,status:lastStatus};
-      }
+      const data = await response.json();
+      const translation = extractText(data?.choices?.[0]?.message?.content);
+      if (!translation) throw new Error("Model tidak menghasilkan teks terjemahan.");
+      return {translation,source,target,language:targetLanguage.name,model,provider:"OpenRouter"};
+    } catch (error) {
+      lastError = error;
+      if (error.status && ![408,429,500,502,503,504].includes(error.status)) throw error;
+    }
+  }
+  throw lastError || new Error("Semua model penerjemah gagal merespons.");
+}
 
-      const parts=d.candidates?.[0]?.content?.parts||[];
-      const audioPart=parts.find(p=>p.inlineData?.data);
-      const audioBase64=audioPart?.inlineData?.data||"";
-      if(!audioBase64){
-        const textMessage=parts.filter(p=>p.text).map(p=>p.text).join(" ").trim();
-        lastError=textMessage||"Gemini merespons, tetapi tidak menyertakan data audio. Periksa dukungan model dan konfigurasi TTS.";
-        lastStatus=502;
-        if(i<models.length-1)continue;
-        return {error:lastError,status:lastStatus};
+async function speakData(body,env) {
+  const text = String(body.text || "").trim();
+  const language = LANGUAGES.find(x=>x.id===body.language);
+  const voice = String(body.voice || "Kore");
+  const allowedVoices = ["Kore","Puck","Zephyr","Charon","Fenrir","Leda","Orus","Aoede"];
+  if (!text || text.length > 1200) {
+    const error = new Error("Teks audio wajib diisi (maksimal 1.200 karakter)."); error.status=400; throw error;
+  }
+  if (!language) {
+    const error = new Error("Bahasa tidak dikenal."); error.status=400; throw error;
+  }
+  if (!allowedVoices.includes(voice)) {
+    const error = new Error("Pilihan suara tidak tersedia."); error.status=400; throw error;
+  }
+
+  const models = [TTS_MODEL(env),TTS_FALLBACK(env)].filter((v,i,a)=>v && a.indexOf(v)===i);
+  let lastError;
+  for (const model of models) {
+    try {
+      const response = await openRouterRequest(env,"/audio/speech",{
+        model,
+        input:text,
+        voice,
+        response_format:"mp3",
+        provider:{sort:"throughput"}
+      });
+      const contentType = (response.headers.get("content-type") || "").split(";")[0].trim();
+      if (!contentType.startsWith("audio/")) {
+        const raw = await response.text();
+        throw new Error("Respons TTS bukan audio: " + raw.slice(0,240));
       }
+      const audioBase64 = arrayBufferToBase64(await response.arrayBuffer());
+      if (!audioBase64) throw new Error("Model TTS mengembalikan audio kosong.");
       return {
         audioBase64,
-        mimeType:audioPart.inlineData.mimeType||"audio/wav",
+        mimeType:contentType || "audio/mpeg",
         language:language.name,
         voice,
-        model:models[i]
+        model,
+        provider:"OpenRouter"
       };
-    }catch(e){
-      lastError="Tidak dapat menghubungi layanan TTS: "+String(e?.message||e);
-      lastStatus=502;
-      if(i<models.length-1)continue;
-      return {error:lastError,status:lastStatus};
+    } catch (error) {
+      lastError = error;
+      if (error.status && ![408,429,500,502,503,504].includes(error.status)) throw error;
     }
   }
-  return {error:lastError,status:lastStatus};
+  throw lastError || new Error("Semua model TTS gagal merespons.");
 }
